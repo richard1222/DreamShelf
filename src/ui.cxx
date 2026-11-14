@@ -77,7 +77,7 @@ void draw_theme_ui(SDL_Renderer *r,A4Font *f,int source,unsigned page,
  }
  if(themes.empty()) {
   text(r,f,370,308,busy?"Fetching themes...":"No catalog loaded.",3,muted);
-  text(r,f,371,367,"L1/R1 chooses another site.",2,muted);
+  text(r,f,371,367,"L1/R1 chooses another site. Triangle retries.",2,muted);
  }
  rounded(r,40,580,1200,72,10,paper);box(r,40,594,5,44,orange);
  std::string first_line=message,second_line;

@@ -16,8 +16,8 @@ build/%.o: src/%.cxx
 	$(CXX) $(CXXFLAGS) -c $< -o $@
 build/themeshelf.elf: $(OBJECTS)
 	$(CXX) $(LDFLAGS) $^ $(LIBS) -o $@
-pkg: build/DreamShelf-v0.1.4.pkg
-build/DreamShelf-v0.1.4.pkg: build/themeshelf.elf assets/ICON0.PNG assets/cacert.pem LICENSE README.md
+pkg: build/DreamShelf-v0.1.6.pkg
+build/DreamShelf-v0.1.6.pkg: build/themeshelf.elf assets/ICON0.PNG assets/cacert.pem LICENSE README.md
 	mkdir -p build/pkg/USRDIR
 	cp assets/ICON0.PNG build/pkg/ICON0.PNG
 	cp assets/cacert.pem LICENSE README.md build/pkg/USRDIR/
@@ -25,7 +25,7 @@ build/DreamShelf-v0.1.4.pkg: build/themeshelf.elf assets/ICON0.PNG assets/cacert
 	sprxlinker build/themeshelf.strip.elf
 	make_self_npdrm build/themeshelf.strip.elf build/pkg/USRDIR/EBOOT.BIN $(CONTENTID)
 	sfo --title "DreamShelf" --appid "$(APPID)" -f $(PS3DEV)/bin/sfo.xml build/pkg/PARAM.SFO
-	pkg --contentid $(CONTENTID) build/pkg/ build/DreamShelf-v0.1.4.debug.pkg
-	cp build/DreamShelf-v0.1.4.debug.pkg $@
+	pkg --contentid $(CONTENTID) build/pkg/ build/DreamShelf-v0.1.6.debug.pkg
+	cp build/DreamShelf-v0.1.6.debug.pkg $@
 	package_finalize $@
 -include $(OBJECTS:.o=.d)

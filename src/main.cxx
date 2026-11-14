@@ -45,11 +45,16 @@ struct Job {
  int source=0;bool download=false;Theme theme;std::vector<Theme> results;
  std::string message,body;int done=0,cancel=0;unsigned progress=0;
  FILE *file=nullptr;size_t bytes=0,limit=0;
+ int last_rc=0;char error[256]={};
+ bool write_error=false,limit_hit=false;
 };
 static size_t receive(char *p,size_t size,size_t count,void *opaque) {
- Job *j=(Job*)opaque;if(size && count>j->limit/size)return 0;
- size_t n=size*count;if(n>j->limit-j->bytes || __atomic_load_n(&j->cancel,__ATOMIC_RELAXED))return 0;
- if(j->file) {if(fwrite(p,1,n,j->file)!=n)return 0;} else j->body.append(p,n);
+ Job *j=(Job*)opaque;
+ if(size && count>j->limit/size){j->limit_hit=true;return 0;}
+ size_t n=size*count;
+ if(n>j->limit-j->bytes){j->limit_hit=true;return 0;}
+ if(__atomic_load_n(&j->cancel,__ATOMIC_RELAXED))return 0;
+ if(j->file) {if(fwrite(p,1,n,j->file)!=n){j->write_error=true;return 0;}} else j->body.append(p,n);
  j->bytes+=n;__atomic_store_n(&j->progress,(unsigned)j->bytes,__ATOMIC_RELAXED);return n;
 }
 static int progress(void *opaque,double,double,double,double) {
@@ -63,25 +68,43 @@ static bool get(Job *j,std::string url,bool binary) {
   CURL *c=network_handle;if(!c){j->message="Network could not start.";return false;}
   curl_easy_reset(c);
   std::string ca=std::string(data_dir)+"cacert.pem";
-  curl_easy_setopt(c,CURLOPT_URL,url.c_str());curl_easy_setopt(c,CURLOPT_USERAGENT,"DreamShelf/0.1.4 PS3");
+  j->error[0]=0;
+  curl_easy_setopt(c,CURLOPT_URL,url.c_str());curl_easy_setopt(c,CURLOPT_USERAGENT,"DreamShelf/0.1.6 PS3");
   curl_easy_setopt(c,CURLOPT_ACCEPT_ENCODING,"");
   curl_easy_setopt(c,CURLOPT_CAINFO,ca.c_str());curl_easy_setopt(c,CURLOPT_SSL_VERIFYPEER,1L);curl_easy_setopt(c,CURLOPT_SSL_VERIFYHOST,2L);
   curl_easy_setopt(c,CURLOPT_FOLLOWLOCATION,0L);curl_easy_setopt(c,CURLOPT_NOSIGNAL,1L);
   curl_easy_setopt(c,CURLOPT_PROTOCOLS,(long)(CURLPROTO_HTTP|CURLPROTO_HTTPS));
   curl_easy_setopt(c,CURLOPT_CONNECTTIMEOUT,8L);curl_easy_setopt(c,CURLOPT_TIMEOUT,binary?180L:30L);
-  curl_easy_setopt(c,CURLOPT_LOW_SPEED_LIMIT,512L);curl_easy_setopt(c,CURLOPT_LOW_SPEED_TIME,15L);
+  // Catalog hosts can be slow to send the first byte on a cold connection:
+  // ps3-themes.com took ~6s to connect and ~14s total on its first fetch, and
+  // a 15s low-speed window aborted a later fetch with rc=28 and 0 bytes.
+  // Catalog fetches get a 45s low-speed window (still bounded by the 30s
+  // hard timeout); downloads keep the tighter 15s window.
+  curl_easy_setopt(c,CURLOPT_LOW_SPEED_LIMIT,512L);curl_easy_setopt(c,CURLOPT_LOW_SPEED_TIME,binary?15L:45L);
+  curl_easy_setopt(c,CURLOPT_ERRORBUFFER,j->error);
   curl_easy_setopt(c,CURLOPT_WRITEFUNCTION,receive);curl_easy_setopt(c,CURLOPT_WRITEDATA,j);
   curl_easy_setopt(c,CURLOPT_PROGRESSFUNCTION,progress);curl_easy_setopt(c,CURLOPT_PROGRESSDATA,j);curl_easy_setopt(c,CURLOPT_NOPROGRESS,0L);
   CURLcode rc=curl_easy_perform(c);long status=0;curl_easy_getinfo(c,CURLINFO_RESPONSE_CODE,&status);
-  double total=0,connect=0;long connections=0;
+  double total=0,connect=0,lookup=0,appconnect=0,pretransfer=0,starttransfer=0;long connections=0;
   curl_easy_getinfo(c,CURLINFO_TOTAL_TIME,&total);curl_easy_getinfo(c,CURLINFO_CONNECT_TIME,&connect);
+  curl_easy_getinfo(c,CURLINFO_NAMELOOKUP_TIME,&lookup);curl_easy_getinfo(c,CURLINFO_APPCONNECT_TIME,&appconnect);
+  curl_easy_getinfo(c,CURLINFO_PRETRANSFER_TIME,&pretransfer);curl_easy_getinfo(c,CURLINFO_STARTTRANSFER_TIME,&starttransfer);
   curl_easy_getinfo(c,CURLINFO_NUM_CONNECTS,&connections);
-  a4_log("network","source=%d binary=%d rc=%d http=%ld bytes=%u total=%.3f connect=%.3f new_connections=%ld",j->source,binary,(int)rc,status,(unsigned)j->bytes,total,connect,connections);
+  j->last_rc=(int)rc;
+  a4_log("network","url=%.120s source=%d binary=%d rc=%d http=%ld bytes=%u total=%.3f lookup=%.3f connect=%.3f appconnect=%.3f pretransfer=%.3f starttransfer=%.3f new_connections=%ld err=%s",url.c_str(),j->source,binary,(int)rc,status,(unsigned)j->bytes,total,lookup,connect,appconnect,pretransfer,starttransfer,connections,j->error);
   char *next=nullptr;curl_easy_getinfo(c,CURLINFO_REDIRECT_URL,&next);std::string redirect=next?next:"";
-  if(rc!=CURLE_OK){j->message=__atomic_load_n(&j->cancel,__ATOMIC_RELAXED)?"Cancelled.":std::string("Connection failed: ")+curl_easy_strerror(rc);return false;}
+  if(rc!=CURLE_OK) {
+   if(__atomic_load_n(&j->cancel,__ATOMIC_RELAXED))j->message="Cancelled.";
+   else if(j->write_error)j->message="Could not write the theme file. Check HDD free space.";
+   else if(j->limit_hit)j->message="Theme file is too large.";
+   else j->message=std::string("Connection failed: ")+curl_easy_strerror(rc);
+   return false;
+  }
   if(status>=300 && status<400 && !redirect.empty()) {
-   if(url.rfind("https://",0)==0 && redirect.rfind("https://",0)!=0){j->message="Secure download redirected to HTTP.";return false;}
-   url=redirect;continue;
+   std::string target=resolve_url(url,redirect);
+   if(target.empty()){j->message="Download host is not supported.";return false;}
+   if(url.rfind("https://",0)==0 && target.rfind("https://",0)!=0){j->message="Secure download redirected to HTTP.";return false;}
+   url=target;continue;
   }
   if(status!=200){char b[80];snprintf(b,sizeof b,"Site returned HTTP %ld. Try another source.",status);j->message=b;return false;}
   return true;
@@ -91,7 +114,13 @@ static bool get(Job *j,std::string url,bool binary) {
 static int worker(void *opaque) {
  Job *j=(Job*)opaque;
  if(!j->download) {
-  if(get(j,catalog_page_url(j->source,j->page),false)) {
+  bool ok=get(j,catalog_page_url(j->source,j->page),false);
+  if(!ok && !__atomic_load_n(&j->cancel,__ATOMIC_RELAXED) &&
+     (j->last_rc==CURLE_OPERATION_TIMEDOUT || j->last_rc==CURLE_COULDNT_RESOLVE_HOST || j->last_rc==CURLE_COULDNT_CONNECT)) {
+   a4_log("network","source=%d retrying catalog fetch once after rc=%d",j->source,j->last_rc);
+   ok=get(j,catalog_page_url(j->source,j->page),false);
+  }
+  if(ok) {
    j->results=parse_catalog(j->source,j->body);
    j->more=catalog_has_next(j->source,j->body);
    if(j->results.empty())j->message="No themes found. Try another source.";
@@ -99,26 +128,55 @@ static int worker(void *opaque) {
   }
  } else {
   std::string url=j->theme.download;
-  if(url.empty() && get(j,j->theme.page,false))url=parse_download(j->body);
-  if(url.empty()) {if(j->message.empty())j->message="No direct P3T download found on this page.";}
+  if(url.empty() && get(j,j->theme.page,false)) {
+   url=parse_download(j->body,j->theme.page);
+   if(url.empty()) {
+    url=themezer_download_url(j->theme.page);
+    if(!url.empty())a4_log("download","no link on theme page; using Themezer API fallback for %.80s",j->theme.title.c_str());
+   }
+  }
+  if(url.empty()) {
+   if(j->message.empty())j->message="No direct P3T download found on this page.";
+   a4_log("download","no download URL for %.80s (page %.120s)",j->theme.title.c_str(),j->theme.page.c_str());
+  }
   else {
    mkdir("/dev_hdd0/theme",0777);
    std::string final="/dev_hdd0/theme/"+filename_for(j->theme),temp=final+".part";
-   struct stat st;
-   if(stat(final.c_str(),&st)==0)j->message="Already downloaded. Select it in XMB Theme Settings.";
+   struct stat st;bool have=false;
+   if(stat(final.c_str(),&st)==0) {
+    // A file with this name counts as "already downloaded" only if it is
+    // really a P3T: a corrupt or zero-byte file left behind must not
+    // block a fresh download forever.
+    FILE *old=fopen(final.c_str(),"rb");
+    unsigned char header[64]={};size_t n=old?fread(header,1,sizeof header,old):0;
+    if(old)fclose(old);
+    have=p3t_header(header,n);
+    if(!have)a4_log("download","existing file %.80s failed the P3T header check; re-downloading",final.c_str());
+   }
+   if(have)j->message="Already downloaded. Select it in XMB Theme Settings.";
    else {
+    a4_log("download","downloading %.80s -> %.80s",j->theme.title.c_str(),final.c_str());
     j->file=fopen(temp.c_str(),"wb+");
-    if(!j->file)j->message="Cannot create theme file. Check HDD free space.";
+    if(!j->file){j->message="Cannot create theme file. Check HDD free space.";a4_log("download","cannot create temp file %.80s",temp.c_str());}
     else {
-     bool ok=get(j,url,true);unsigned char header[64]={};
-     if(fflush(j->file)!=0)ok=false;
+     bool ok=get(j,url,true);unsigned char header[64]={};bool save_error=false;
+     if(fflush(j->file)!=0){ok=false;save_error=true;}
      rewind(j->file);size_t n=fread(header,1,sizeof header,j->file);
      if(!p3t_header(header,n)){if(ok)j->message="Download is not a P3T theme.";ok=false;}
-     if(fclose(j->file)!=0)ok=false;
+     if(fclose(j->file)!=0){ok=false;save_error=true;}
      j->file=nullptr;
      if(__atomic_load_n(&j->cancel,__ATOMIC_RELAXED))ok=false;
-     if(ok && rename(temp.c_str(),final.c_str())==0)j->message="Downloaded! Quit, then open XMB > Theme Settings > Theme.";
-     else {remove(temp.c_str());if(ok)j->message="Could not save theme.";}
+     if(ok && rename(temp.c_str(),final.c_str())==0) {
+      j->message="Downloaded! Quit, then open XMB > Theme Settings > Theme.";
+      a4_log("download","saved %.80s (%u bytes)",final.c_str(),(unsigned)j->bytes);
+     } else {
+      remove(temp.c_str());
+      if(ok)j->message="Could not save theme.";
+      else if(save_error && j->message.empty())j->message="Could not save the theme file.";
+      else if(j->message.empty())j->message="Download failed.";
+      if(__atomic_load_n(&j->cancel,__ATOMIC_RELAXED))a4_log("download","cancelled %.80s",j->theme.title.c_str());
+      else a4_log("download","failed %.80s: %s",j->theme.title.c_str(),j->message.c_str());
+     }
     }
    }
   }
@@ -126,7 +184,7 @@ static int worker(void *opaque) {
  __atomic_store_n(&j->done,1,__ATOMIC_RELEASE);return 0;
 }
 int main() {
- a4_log("boot","DreamShelf 0.1.4 diagnostic: entered main");
+ a4_log("boot","DreamShelf 0.1.6: entered main");
  sysModuleLoad(SYSMODULE_NET);netInitialize();curl_global_init(CURL_GLOBAL_DEFAULT);
  a4_log("boot","network libraries initialized");
  network_handle=curl_easy_init();
@@ -157,10 +215,21 @@ int main() {
  unsigned pages[3]={1,1,1},loaded_pages[3]={0,0,0};
  std::vector<Theme> themes;int source=0,selected=0;uint32_t held=0;bool dirty=true;
  std::string message;Job *job=nullptr;SDL_Thread *thread=nullptr;
+ // Pending actions: input stays live while a worker runs. In 0.1.4 every
+ // button except Circle was dropped until the fetch finished, which on the
+ // slow catalog host took 14-22s and looked like a dead controller. A load
+ // or download requested mid-job is recorded here and executed when the
+ // worker is joined, so the single-worker / single-CURL-handle invariant
+ // still holds.
+ bool pending_load=false,pending_force=false,pending_enter_last=false;
+ bool pending_download=false;Theme pending_theme;
  auto load_source=[&](bool force,bool enter_last=false) {
   if(loaded_pages[source]!=pages[source]) {
    catalogs[source]=CatalogCache{};
-   read_catalog_cache(cache_path(source,pages[source]),source,catalogs[source]);
+   uint64_t now=(uint64_t)time(nullptr);
+   bool disk=read_catalog_cache(cache_path(source,pages[source]),source,catalogs[source]);
+   if(!disk)a4_log("cache","source=%d page=%u miss; fetching from network",source,pages[source]);
+   else if(!catalogs[source].fresh(now))a4_log("cache","source=%d page=%u stale age=%llus; refreshing",source,pages[source],(unsigned long long)(now>=catalogs[source].fetched?now-catalogs[source].fetched:0));
    loaded_pages[source]=pages[source];
   }
   themes=catalogs[source].entries;selected=enter_last && !themes.empty()?(int)themes.size()-1:0;
@@ -174,55 +243,82 @@ int main() {
   thread=SDL_CreateThread(worker,"catalog",job);
   if(!thread){delete job;job=nullptr;message="Could not create network worker.";}
  };
+ auto start_download=[&](const Theme &t) {
+  job=new Job;job->source=source;job->download=true;job->theme=t;
+  message="Downloading theme... Circle cancels.";
+  thread=SDL_CreateThread(worker,"network",job);
+  if(!thread){delete job;job=nullptr;message="Could not create network worker.";}
+ };
+ auto request_load=[&](bool force,bool enter_last) {
+  // A catalog job in flight is cancelled and the load runs when the worker
+  // is joined; a download in flight is left alone and the load queues behind it.
+  if(!job){load_source(force,enter_last);return;}
+  bool was_download=job->download;
+  if(!was_download)__atomic_store_n(&job->cancel,1,__ATOMIC_RELAXED);
+  pending_load=true;pending_force=force;pending_enter_last=enter_last;pending_download=false;
+  if(!was_download)message="Loading catalog...";
+ };
  load_source(false);a4_log("boot","catalog started; entering menu loop");
  while(!quitting || job) {
   a4_watchdog_tick();a4_watchdog_phase(A4_PHASE_SYSUTIL);
   sysUtilCheckCallback();SDL_Event ev;while(SDL_PollEvent(&ev))if(ev.type==SDL_QUIT)quitting=true;
   a4_watchdog_phase(A4_PHASE_INPUT);
-  A4Pad pad;a4_pad_poll(&pad);uint32_t pressed=pad.buttons&~held;held=pad.buttons;
+  A4Pad pad;a4_pad_poll(&pad);
+  if(pad.buttons!=held)a4_log("pad","buttons=0x%08x lx=%d ly=%d present=%d port=%d",(unsigned)pad.buttons,(int)pad.lx,(int)pad.ly,pad.present,pad.port);
+  uint32_t pressed=pad.buttons&~held;held=pad.buttons;
   if(job && __atomic_load_n(&job->done,__ATOMIC_ACQUIRE)) {
    SDL_WaitThread(thread,nullptr);
-   if(!job->download && !job->results.empty()) {
-    themes.swap(job->results);selected=job->enter_last?(int)themes.size()-1:0;catalogs[source].entries=themes;
-    catalogs[source].more=job->more;
-    catalogs[source].fetched=(uint64_t)time(nullptr);
-    if(!write_catalog_cache(cache_path(source,pages[source]),source,catalogs[source]))a4_log("cache","source=%d disk save failed; memory cache retained",source);
+   int jsrc=job->source;unsigned jpage=job->page;bool jdl=job->download;bool jenter=job->enter_last;
+   if(!jdl && !job->results.empty()) {
+    catalogs[jsrc].entries=job->results;catalogs[jsrc].more=job->more;
+    catalogs[jsrc].fetched=(uint64_t)time(nullptr);
+    if(!write_catalog_cache(cache_path(jsrc,jpage),jsrc,catalogs[jsrc]))a4_log("cache","source=%d disk save failed; memory cache retained",jsrc);
+    // The user may have switched source/page while this fetch ran; only
+    // swap the results onto the screen if they are for what is showing.
+    if(jsrc==source && jpage==pages[source]){themes=catalogs[jsrc].entries;selected=jenter?(int)themes.size()-1:0;}
    }
    message=job->message;delete job;job=nullptr;thread=nullptr;dirty=true;
+   if(!quitting) {
+    if(pending_download){pending_download=false;Theme t=pending_theme;pending_theme=Theme{};if(!t.title.empty())start_download(t);}
+    else if(pending_load){pending_load=false;bool f=pending_force;bool e=pending_enter_last;pending_force=false;pending_enter_last=false;load_source(f,e);}
+   } else {pending_load=false;pending_download=false;}
   }
   if(quitting && job)__atomic_store_n(&job->cancel,1,__ATOMIC_RELAXED);
   if(!quitting && pressed) {
-   if(pressed&A4B_BIT(A4B_CIRCLE)){if(job){__atomic_store_n(&job->cancel,1,__ATOMIC_RELAXED);message="Cancelling...";}else quitting=true;}
-   if(!job) {
-    bool load=false,force=false,enter_last=false;
-    if(pressed&A4B_BIT(A4B_R1)){source=(source+1)%3;themes.clear();selected=0;load=true;}
-    if(pressed&A4B_BIT(A4B_L1)){source=(source+2)%3;themes.clear();selected=0;load=true;}
-    if(pressed&A4B_BIT(A4B_TRIANGLE)){load=true;force=true;}
-    if(!load && !themes.empty()) {
-     bool next=(pressed&A4B_BIT(A4B_R2)) || ((pressed&A4B_BIT(A4B_DOWN)) && selected==(int)themes.size()-1) || ((pressed&A4B_BIT(A4B_RIGHT)) && selected==(int)themes.size()-1);
-     bool prev=(pressed&A4B_BIT(A4B_L2)) || ((pressed&A4B_BIT(A4B_UP)) && selected==0);
-     if(next) {
-      if(catalogs[source].more){++pages[source];load=true;}
-      else message="End of this site's catalog.";
-     } else if(prev) {
-      if(pages[source]>1){--pages[source];load=true;enter_last=true;}
-     } else {
-     if(pressed&A4B_BIT(A4B_DOWN))selected=std::min(selected+1,(int)themes.size()-1);
-     if(pressed&A4B_BIT(A4B_UP))selected=std::max(selected-1,0);
-     if(pressed&A4B_BIT(A4B_RIGHT))selected=std::min(selected+10,(int)themes.size()-1);
-     if(pressed&A4B_BIT(A4B_LEFT))selected=std::max(selected-10,0);
-     }
+   if(pressed&A4B_BIT(A4B_CIRCLE)){
+    if(job){__atomic_store_n(&job->cancel,1,__ATOMIC_RELAXED);pending_load=false;pending_download=false;message="Cancelling...";}
+    else quitting=true;
+   }
+   // Every other button works whether or not a worker is running: navigation
+   // applies to the entries on screen immediately, and loads/downloads
+   // requested mid-job are queued behind the running worker.
+   bool load=false,force=false,enter_last=false;
+   if(pressed&A4B_BIT(A4B_R1)){source=(source+1)%3;themes.clear();selected=0;load=true;}
+   if(pressed&A4B_BIT(A4B_L1)){source=(source+2)%3;themes.clear();selected=0;load=true;}
+   if(pressed&A4B_BIT(A4B_TRIANGLE)){load=true;force=true;}
+   if(!load && !themes.empty()) {
+    bool next=(pressed&A4B_BIT(A4B_R2)) || ((pressed&A4B_BIT(A4B_DOWN)) && selected==(int)themes.size()-1) || ((pressed&A4B_BIT(A4B_RIGHT)) && selected==(int)themes.size()-1);
+    bool prev=(pressed&A4B_BIT(A4B_L2)) || ((pressed&A4B_BIT(A4B_UP)) && selected==0);
+    if(next) {
+     if(catalogs[source].more){++pages[source];load=true;}
+     else message="End of this site's catalog.";
+    } else if(prev) {
+     if(pages[source]>1){--pages[source];load=true;enter_last=true;}
+    } else {
+    if(pressed&A4B_BIT(A4B_DOWN))selected=std::min(selected+1,(int)themes.size()-1);
+    if(pressed&A4B_BIT(A4B_UP))selected=std::max(selected-1,0);
+    if(pressed&A4B_BIT(A4B_RIGHT))selected=std::min(selected+10,(int)themes.size()-1);
+    if(pressed&A4B_BIT(A4B_LEFT))selected=std::max(selected-10,0);
     }
-    // A failed page fetch leaves the page number intact so it can be retried,
-    // or left with L2 even when it has no entries yet.
-    if(!load && themes.empty() && (pressed&A4B_BIT(A4B_L2)) && pages[source]>1){--pages[source];load=true;enter_last=true;}
-    if(load)load_source(force,enter_last);
-    else if((pressed&A4B_BIT(A4B_CROSS)) && !themes.empty()) {
-     job=new Job;job->source=source;job->download=true;job->theme=themes[selected];
-     message="Downloading theme... Circle cancels.";
-     thread=SDL_CreateThread(worker,"network",job);
-     if(!thread){delete job;job=nullptr;message="Could not create network worker.";}
-    }
+   }
+   // A failed page fetch leaves the page number intact so it can be retried,
+   // or left with L2 even when it has no entries yet.
+   if(!load && themes.empty() && (pressed&A4B_BIT(A4B_L2)) && pages[source]>1){--pages[source];load=true;enter_last=true;}
+   if(load)request_load(force,enter_last);
+   else if((pressed&A4B_BIT(A4B_CROSS)) && !themes.empty()) {
+    if(!job)start_download(themes[selected]);
+    else if(!job->download){pending_theme=themes[selected];pending_download=true;pending_load=false;__atomic_store_n(&job->cancel,1,__ATOMIC_RELAXED);message="Downloading theme... Circle cancels.";}
+    // A download already in flight: X is ignored until it finishes.
    }
    dirty=true;
   }

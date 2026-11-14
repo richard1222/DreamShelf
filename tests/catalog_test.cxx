@@ -15,6 +15,23 @@ int main(int argc,char **argv) {
  assert(!allowed_url("file:///dev_flash/a"));assert(!allowed_url("https://127.0.0.1/a"));
  assert(!allowed_url("http://download.ps3-themes.com:8080/a.p3t"));
  assert(parse_download("<a href='https://evil.com/a.p3t'>Download</a>").empty());
+ // v0.1.6: relative download links resolve against the theme page URL.
+ assert(parse_download("<a href='/x.p3t'>D</a>","http://www.ps3-themes.com/t")=="http://www.ps3-themes.com/x.p3t");
+ assert(parse_download("<a href='//download.ps3-themes.com/x.p3t'>D</a>","http://www.ps3-themes.com/t")=="http://download.ps3-themes.com/x.p3t");
+ assert(parse_download("<a href='javascript:dl()'>D</a>","http://www.ps3-themes.com/t").empty());
+ assert(parse_download("<a href='#top'>D</a>","http://www.ps3-themes.com/t").empty());
+ assert(parse_download("<a href='//evil.com/x.p3t'>D</a>","http://www.ps3-themes.com/t").empty());
+ assert(resolve_url("https://themezer.net/ps3/themes/a-1E4B0","/ps3/themes/1E4B0/download")=="https://themezer.net/ps3/themes/1E4B0/download");
+ assert(resolve_url("https://a.com/dir/page","next.p3t")=="https://a.com/dir/next.p3t");
+ assert(resolve_url("https://a.com/dir/page","https://b.com/x.p3t")=="https://b.com/x.p3t");
+ assert(resolve_url("https://a.com/dir/page","data:text/plain,x").empty());
+ // v0.1.6: Themezer API fallback derives the download URL from the slug ID
+ // (proven by all 28 curated entries pairing slug ...-<ID> with the API URL).
+ assert(themezer_download_url("https://themezer.net/ps3/themes/ps4-xmb-2-0-1E4B0")=="https://api.themezer.net/ps3/themes/1E4B0/download?src=webapp");
+ assert(themezer_download_url("https://themezer.net/ps3/themes/bayonetta-dynamic-theme-2-1DB82/")=="https://api.themezer.net/ps3/themes/1DB82/download?src=webapp");
+ assert(themezer_download_url("https://themezer.net/ps3/themes/").empty());
+ assert(themezer_download_url("http://www.ps3-themes.com/theme.html").empty());
+ assert(themezer_download_url("https://themezer.net/ps3/themes/no-id-here").empty());
  assert(parse_catalog(0,"<h2 class='entry-title'><a href='http://www.ps3-themes.com/test.html'>A &amp; B</a></h2>")[0].title=="A & B");
  assert(filename_for({"../../evil", "https://themezer.net/a", ""}).find('/')==std::string::npos);
  unsigned char header[64]={'P','3','T','F'};assert(p3t_header(header,64));assert(!p3t_header(header,4));header[0]='<';assert(!p3t_header(header,64));

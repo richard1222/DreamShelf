@@ -13,7 +13,7 @@ Download PS3 themes directly on your console, with a Dreamcast-inspired interfac
 
 ## Install
 
-Download **DreamShelf-v0.1.4.pkg** from [Releases](https://github.com/richard1222/DreamShelf/releases), install it with Package Manager, then open **DreamShelf**. CFW or HEN is required to run the app.
+Download **DreamShelf-v0.1.6.pkg** from [Releases](https://github.com/richard1222/DreamShelf/releases), install it with Package Manager, then open **DreamShelf**. CFW or HEN is required to run the app.
 
 Themes save to `/dev_hdd0/theme/`. Quit the app and select one through **Settings > Theme Settings > Theme**. DreamShelf does not apply themes automatically.
 
@@ -43,7 +43,7 @@ HTTPS downloads verify certificates against the included Mozilla CA list from cu
 
 Use a [PSL1GHT](https://github.com/ps3dev/PSL1GHT) toolchain with SDL2, curl, mbedTLS and zlib [PS3 portlibs](https://github.com/ps3dev/ps3libraries). Set `PS3DEV` and `PSL1GHT` to your SDK prefix and add its `bin`, `ppu/bin` and `spu/bin` directories to PATH. Run `make pkg`.
 
-The installable, finalized output is `build/DreamShelf-v0.1.4.pkg`. The `.debug.pkg` file is an intermediate. Application ID `THMS00001` preserves the existing ThemeShelf installation identity.
+The installable, finalized output is `build/DreamShelf-v0.1.6.pkg`. The `.debug.pkg` file is an intermediate. Application ID `THMS00001` preserves the existing ThemeShelf installation identity.
 
 Host tests are in `tests/`. The catalog test accepts saved HTML fixtures as command-line arguments; those third-party pages are not bundled. Cache tests and the UI raster preview can run with a C++17 host compiler. Network timing and startup logs are written to `/dev_hdd0/tmp/themeshelf.log`; caches use `/dev_hdd0/tmp/themeshelf/`.
 

@@ -58,11 +58,64 @@ bool allowed_url(const std::string &url) {
  for(auto h:hosts)if(host==h)return true;
  return false;
 }
-std::string parse_download(const std::string &html) {
+// Resolve ref against base. Absolute URLs pass through unchanged;
+// protocol-relative (//host/path) takes the base scheme; root-relative
+// (/path) takes the base scheme+host; bare relative paths resolve
+// against the base URL's directory. Fragments, unknown schemes
+// (javascript:, data:) and unresolvable refs yield empty: the caller
+// re-checks the result with allowed_url() either way.
+std::string resolve_url(const std::string &base, const std::string &ref) {
+ if(ref.empty())return {};
+ if(ref.find("://")!=std::string::npos)return ref;
+ size_t colon=ref.find(':');
+ if(colon!=std::string::npos) {
+  size_t delim=ref.find_first_of("/?#");
+  if(delim==std::string::npos || colon<delim)return {};
+ }
+ size_t p=base.find("://");if(p==std::string::npos)return {};
+ std::string scheme=base.substr(0,p);
+ size_t host_begin=p+3,end=base.find_first_of("/?#",host_begin);
+ std::string host=base.substr(host_begin,end==std::string::npos?end:end-host_begin);
+ if(host.empty())return {};
+ if(ref.rfind("//",0)==0)return scheme+":"+ref;
+ if(ref[0]=='#')return {};
+ if(ref[0]=='?') {
+  std::string b=base;size_t q=b.find('?');if(q!=std::string::npos)b.resize(q);
+  size_t h=b.find('#');if(h!=std::string::npos)b.resize(h);
+  return b+ref;
+ }
+ if(ref[0]=='/')return scheme+"://"+host+ref;
+ size_t slash=base.rfind('/');
+ if(slash!=std::string::npos && slash>=host_begin)return base.substr(0,slash+1)+ref;
+ return scheme+"://"+host+"/"+ref;
+}
+// Themezer download fallback. Themezer detail pages expose downloads
+// through the API endpoint https://api.themezer.net/ps3/themes/<ID>/download
+// (the same URLs the curated catalog embeds in data-original-href), and
+// the theme ID is the trailing segment of the page slug: all 28 curated
+// entries pair slug ...-<ID> with API URL .../themes/<ID>/download.
+// Used only when the detail page yields no download link at all, so a
+// wrong guess degrades to a visible HTTP error, never a silent failure.
+std::string themezer_download_url(const std::string &page_url) {
+ const std::string prefix="https://themezer.net/ps3/themes/";
+ if(page_url.rfind(prefix,0)!=0)return {};
+ std::string slug=page_url.substr(prefix.size());
+ size_t cut=slug.find_first_of("?#");if(cut!=std::string::npos)slug.resize(cut);
+ while(!slug.empty() && slug.back()=='/')slug.pop_back();
+ size_t dash=slug.rfind('-');if(dash==std::string::npos)return {};
+ std::string id=slug.substr(dash+1);
+ if(id.size()<3 || id.size()>12)return {};
+ bool digit=false;
+ for(unsigned char c:id){if(!isalnum(c))return {};if(isdigit(c))digit=true;}
+ if(!digit)return {};
+ return "https://api.themezer.net/ps3/themes/"+id+"/download?src=webapp";
+}
+std::string parse_download(const std::string &html, const std::string &base_url) {
  size_t i=0;
  while((i=html.find("<a",i))!=std::string::npos) {
   size_t end=html.find('>',i);if(end==std::string::npos)break;
   auto url=attribute(html.substr(i,end-i+1),"href");i=end+1;
+  url=resolve_url(base_url,url);
   if(allowed_url(url) && (url.find(".p3t")!=std::string::npos || url.find("/download")!=std::string::npos))return url;
  }
  return {};
