@@ -3,11 +3,13 @@
 #include <algorithm>
 #include <cctype>
 #include <cstdint>
+#include <cstdio>
 #include <set>
-const Source sources[3] = {
+const Source sources[4] = {
  {"PS3-Themes", "http://www.ps3-themes.com/"},
  {"Themezer", "https://themezer.net/ps3/themes"},
- {"Curated backup", "https://whatwhatboy.com/console/ps3/themes.html"}
+ {"Curated backup", "https://whatwhatboy.com/console/ps3/themes.html"},
+ {"Saber Pack", "pack://local"}
 };
 static std::string attribute(const std::string &tag, const std::string &key) {
  size_t i=tag.find_first_of(" \t\r\n"); if(i==std::string::npos)return {};
@@ -122,7 +124,10 @@ std::string parse_download(const std::string &html, const std::string &base_url)
 }
 std::vector<Theme> parse_catalog(int source, const std::string &html) {
  std::vector<Theme> out;std::set<std::string> seen;
- if(source<0 || source>2 || html.size()>4*1024*1024)return out;
+ if(source<0 || source>3 || html.size()>4*1024*1024)return out;
+ // Source 3 is the bundled Saber Pack: its list comes from
+ // pack_catalog(), never from parsed HTML.
+ if(source==3)return out;
  const char *marker=source==0?"entry-title":source==1?"class=\"card-link\"":"class=\"ps3-theme-card\"";
  size_t i=0;
  while((i=html.find(marker,i))!=std::string::npos && out.size()<128) {
@@ -158,14 +163,16 @@ std::string filename_for(const Theme &t) {
 }
 bool p3t_header(const unsigned char *p,size_t n) {return n>=64 && p[0]=='P' && p[1]=='3' && p[2]=='T' && p[3]=='F';}
 std::string catalog_page_url(int source,unsigned page) {
- if(source<0 || source>2 || page==0)return {};
+ if(source<0 || source>3 || page==0)return {};
  if(page==1)return sources[source].url;
+ if(source==3)return {};
  if(source==0)return "http://www.ps3-themes.com/page/"+std::to_string(page);
  if(source==1)return "https://themezer.net/ps3/themes?page="+std::to_string(page);
  return {};
 }
 bool catalog_has_next(int source,const std::string &html) {
- if(source==2)return false;
+ if(source<0 || source>3)return false;
+ if(source==2 || source==3)return false;
  if(source==0) {
   size_t i=0;
   while((i=html.find('<',i))!=std::string::npos) {
@@ -183,5 +190,57 @@ bool catalog_has_next(int source,const std::string &html) {
   auto tag=html.substr(begin,end-begin+1);
   return tag.find(" disabled=")==std::string::npos && tag.find(" disabled ")==std::string::npos && tag.find(" disabled>")==std::string::npos;
  }
+ return false;
+}
+// Saber Pack manifest: pretty title + bundled filename per entry.
+// Hardcoded on purpose: titles stay presentable and the order stable.
+// Entries whose file is absent from the pkg (or fails the P3TF check)
+// are skipped, so a partial pack still lists exactly what it ships.
+struct PackItem { const char *title, *file; };
+static const PackItem pack_items[] = {
+ {"Saber Royal HD", "Saber-Royal-HD-v1.3.p3t"},
+ {"Dreamcast Nostalgia", "Dreamcast-Nostalgia.p3t"},
+ {"Neon Xbox Green", "Neon-Xbox-Green.p3t"},
+ {"Saber Alter Black", "Saber-Alter-Black.p3t"},
+ {"Midnight Carbon", "Midnight-Carbon.p3t"},
+ {"Vocaloid Teal", "Vocaloid-Teal.p3t"}
+};
+std::vector<Theme> pack_catalog(const std::string &pack_dir) {
+ std::vector<Theme> out;
+ for(const auto &item:pack_items) {
+  FILE *f=fopen((pack_dir+item.file).c_str(),"rb");
+  if(!f)continue;
+  unsigned char header[64]={};size_t n=fread(header,1,sizeof header,f);fclose(f);
+  if(!p3t_header(header,n))continue;
+  std::string ref=std::string("pack://")+item.file;
+  out.push_back({item.title,ref,ref});
+ }
+ return out;
+}
+std::string parse_update_version(const std::string &json) {
+ size_t key=json.find("\"version\"");if(key==std::string::npos)return {};
+ size_t colon=json.find(':',key+9);if(colon==std::string::npos)return {};
+ size_t open=json.find('"',colon+1);if(open==std::string::npos)return {};
+ size_t close=json.find('"',open+1);if(close==std::string::npos)return {};
+ std::string v=json.substr(open+1,close-open-1);
+ return v.size()<=16?v:std::string{};
+}
+static bool version_parts(const std::string &s,int parts[3]) {
+ parts[0]=parts[1]=parts[2]=0;
+ size_t i=(!s.empty() && (s[0]=='v' || s[0]=='V'))?1:0;
+ for(int p=0;p<3;++p) {
+  if(i>=s.size())return p>0;
+  if(!isdigit((unsigned char)s[i]))return false;
+  long value=0;
+  while(i<s.size() && isdigit((unsigned char)s[i])) {value=value*10+(s[i]-'0');if(value>100000)return false;++i;}
+  parts[p]=(int)value;
+  if(i<s.size()) {if(s[i]!='.')return false;++i;}
+ }
+ return i==s.size();
+}
+bool update_is_newer(const std::string &latest,const std::string &current) {
+ int a[3],b[3];
+ if(!version_parts(latest,a) || !version_parts(current,b))return false;
+ for(int i=0;i<3;++i)if(a[i]!=b[i])return a[i]>b[i];
  return false;
 }

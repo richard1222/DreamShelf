@@ -6,3 +6,5 @@
 *.exe
 *.ppm
 __pycache__/
+
+pack-staging/

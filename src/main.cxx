@@ -5,6 +5,7 @@
 #include "common/pad.h"
 #include "common/log.h"
 #include "common/watchdog.h"
+#include "common/bgm.h"
 #include "launcher/font_text.h"
 #include <SDL.h>
 #include <curl/curl.h>
@@ -23,6 +24,10 @@
 #include <vector>
 
 static const char *data_dir="/dev_hdd0/game/THMS00001/USRDIR/";
+// The single source of truth for the running version: it feeds both the
+// curl User-Agent and the update checker, so the two can never drift.
+#define DS_VERSION "0.1.9"
+static const char *update_manifest_url="https://raw.githubusercontent.com/richard1222/DreamShelf/main/update.json";
 // Used by one worker at a time; retaining the handle preserves DNS, TLS sessions
 // and live connections across page fetches, redirects and later downloads.
 static CURL *network_handle=nullptr;
@@ -43,6 +48,7 @@ void a4_log(const char *tag,const char *fmt,...) {
 struct Job {
  unsigned page=1;bool more=false,enter_last=false;
  int source=0;bool download=false;Theme theme;std::vector<Theme> results;
+ bool update_check=false,update_manual=false;
  std::string message,body;int done=0,cancel=0;unsigned progress=0;
  FILE *file=nullptr;size_t bytes=0,limit=0;
  int last_rc=0;char error[256]={};
@@ -69,7 +75,7 @@ static bool get(Job *j,std::string url,bool binary) {
   curl_easy_reset(c);
   std::string ca=std::string(data_dir)+"cacert.pem";
   j->error[0]=0;
-  curl_easy_setopt(c,CURLOPT_URL,url.c_str());curl_easy_setopt(c,CURLOPT_USERAGENT,"DreamShelf/0.1.6 PS3");
+  curl_easy_setopt(c,CURLOPT_URL,url.c_str());curl_easy_setopt(c,CURLOPT_USERAGENT,"DreamShelf/" DS_VERSION " PS3");
   curl_easy_setopt(c,CURLOPT_ACCEPT_ENCODING,"");
   curl_easy_setopt(c,CURLOPT_CAINFO,ca.c_str());curl_easy_setopt(c,CURLOPT_SSL_VERIFYPEER,1L);curl_easy_setopt(c,CURLOPT_SSL_VERIFYHOST,2L);
   curl_easy_setopt(c,CURLOPT_FOLLOWLOCATION,0L);curl_easy_setopt(c,CURLOPT_NOSIGNAL,1L);
@@ -111,9 +117,72 @@ static bool get(Job *j,std::string url,bool binary) {
  }
  j->message="Too many redirects.";return false;
 }
+// Saber Pack "download": the theme file is bundled in the pkg, so
+// installing is a local copy into /dev_hdd0/theme/ under its bundled
+// name (an identical file already there is detected, exactly like a
+// completed network download). Same .part + rename discipline and the
+// same P3TF gate as the network path.
+static void install_pack_theme(Job *j) {
+ std::string file=j->theme.download.substr(7); // strip "pack://"
+ if(file.empty() || file.find_first_of("/\\")!=std::string::npos || file.find("..")!=std::string::npos) {
+  j->message="Bundled theme name is invalid.";return;
+ }
+ a4_log("pack","install start %.80s",file.c_str());
+ mkdir("/dev_hdd0/theme",0777);
+ std::string final="/dev_hdd0/theme/"+file,temp=final+".part";
+ struct stat st;bool have=false;
+ if(stat(final.c_str(),&st)==0) {
+  FILE *old=fopen(final.c_str(),"rb");
+  unsigned char header[64]={};size_t n=old?fread(header,1,sizeof header,old):0;
+  if(old)fclose(old);
+  have=p3t_header(header,n);
+ }
+ if(have){j->message="Already downloaded. Select it in XMB Theme Settings.";a4_log("pack","already downloaded %.80s",file.c_str());return;}
+ std::string src=std::string(data_dir)+"pack/"+file;
+ FILE *in=fopen(src.c_str(),"rb");
+ if(!in){j->message="Bundled theme file is missing from the pack.";a4_log("pack","missing bundled file %.80s",file.c_str());return;}
+ unsigned char header[64]={};size_t hn=fread(header,1,sizeof header,in);
+ if(!p3t_header(header,hn)){fclose(in);j->message="Bundled file is not a P3T theme.";a4_log("pack","bundled file %.80s failed the P3T header check",file.c_str());return;}
+ rewind(in);
+ FILE *out=fopen(temp.c_str(),"wb");
+ if(!out){fclose(in);j->message="Cannot create theme file. Check HDD free space.";return;}
+ std::vector<unsigned char> buf(65536);size_t n;bool ok=true;size_t total=0;
+ while((n=fread(buf.data(),1,buf.size(),in))>0) {
+  if(__atomic_load_n(&j->cancel,__ATOMIC_RELAXED)){ok=false;break;}
+  if(fwrite(buf.data(),1,n,out)!=n){ok=false;j->message="Could not write the theme file. Check HDD free space.";break;}
+  total+=n;__atomic_store_n(&j->progress,(unsigned)total,__ATOMIC_RELAXED);
+ }
+ if(ferror(in))ok=false;
+ if(fflush(out)!=0)ok=false;
+ if(fclose(out)!=0)ok=false;
+ fclose(in);
+ j->bytes=total;
+ if(__atomic_load_n(&j->cancel,__ATOMIC_RELAXED)){remove(temp.c_str());j->message="Cancelled.";a4_log("pack","install cancelled %.80s",file.c_str());return;}
+ if(ok && rename(temp.c_str(),final.c_str())==0) {
+  j->message="Installed! Quit, then open XMB > Theme Settings > Theme.";
+  a4_log("pack","installed %.80s (%u bytes)",file.c_str(),(unsigned)total);
+ } else {
+  remove(temp.c_str());
+  if(j->message.empty())j->message="Could not save theme.";
+  a4_log("pack","install failed %.80s: %s",file.c_str(),j->message.c_str());
+ }
+}
 static int worker(void *opaque) {
  Job *j=(Job*)opaque;
- if(!j->download) {
+ if(j->update_check) {
+  // Message-only update check: fetch the tiny manifest, compare, and
+  // report. The automatic check stays silent unless a newer version
+  // exists; a cancelled check never says anything.
+  bool ok=get(j,update_manifest_url,false);
+  std::string found=ok?parse_update_version(j->body):"";
+  if(__atomic_load_n(&j->cancel,__ATOMIC_RELAXED))j->message.clear();
+  else if(!found.empty() && update_is_newer(found,DS_VERSION))
+   j->message="DreamShelf "+found+" is available - get it on Brewology or GitHub.";
+  else if(j->update_manual)
+   j->message=!found.empty()?"You are up to date (version " DS_VERSION ").":"Update check failed.";
+  else j->message.clear();
+  a4_log("update","manual=%d ok=%d found=%.16s message=%.80s",j->update_manual,ok,found.c_str(),j->message.c_str());
+ } else if(!j->download) {
   bool ok=get(j,catalog_page_url(j->source,j->page),false);
   if(!ok && !__atomic_load_n(&j->cancel,__ATOMIC_RELAXED) &&
      (j->last_rc==CURLE_OPERATION_TIMEDOUT || j->last_rc==CURLE_COULDNT_RESOLVE_HOST || j->last_rc==CURLE_COULDNT_CONNECT)) {
@@ -126,6 +195,8 @@ static int worker(void *opaque) {
    if(j->results.empty())j->message="No themes found. Try another source.";
    else j->message="Choose a theme. X downloads; L1/R1 changes source.";
   }
+ } else if(j->source==3 || j->theme.download.rfind("pack://",0)==0) {
+  install_pack_theme(j);
  } else {
   std::string url=j->theme.download;
   if(url.empty() && get(j,j->theme.page,false)) {
@@ -184,7 +255,7 @@ static int worker(void *opaque) {
  __atomic_store_n(&j->done,1,__ATOMIC_RELEASE);return 0;
 }
 int main() {
- a4_log("boot","DreamShelf 0.1.6: entered main");
+ a4_log("boot","DreamShelf " DS_VERSION ": entered main");
  sysModuleLoad(SYSMODULE_NET);netInitialize();curl_global_init(CURL_GLOBAL_DEFAULT);
  a4_log("boot","network libraries initialized");
  network_handle=curl_easy_init();
@@ -211,8 +282,8 @@ int main() {
  SDL_RenderPresent(r);a4_log("boot","first simple present returned");SDL_Delay(20);a4_watchdog_tick();
  a4_watchdog_phase(A4_PHASE_LOAD);
  mkdir("/dev_hdd0/tmp/themeshelf",0777);
- CatalogCache catalogs[3];
- unsigned pages[3]={1,1,1},loaded_pages[3]={0,0,0};
+ CatalogCache catalogs[4];
+ unsigned pages[4]={1,1,1,1},loaded_pages[4]={0,0,0,0};
  std::vector<Theme> themes;int source=0,selected=0;uint32_t held=0;bool dirty=true;
  std::string message;Job *job=nullptr;SDL_Thread *thread=nullptr;
  // Pending actions: input stays live while a worker runs. In 0.1.4 every
@@ -223,7 +294,25 @@ int main() {
  // still holds.
  bool pending_load=false,pending_force=false,pending_enter_last=false;
  bool pending_download=false;Theme pending_theme;
+ bool pending_update=false;
+ // The automatic update check runs once, after the first catalog load
+ // has settled (cache hit or finished fetch), and only while no other
+ // job is running, so it can never delay browsing.
+ bool first_load_settled=false,update_checked=false;
  auto load_source=[&](bool force,bool enter_last=false) {
+  if(source==3) {
+   // Saber Pack: the list is built locally from the bundled files.
+   // No disk cache, no network; Triangle simply rebuilds the list.
+   catalogs[3]=CatalogCache{};
+   catalogs[3].entries=pack_catalog(std::string(data_dir)+"pack/");
+   catalogs[3].fetched=(uint64_t)time(nullptr);
+   loaded_pages[3]=pages[3];
+   themes=catalogs[3].entries;selected=enter_last && !themes.empty()?(int)themes.size()-1:0;
+   message=themes.empty()?"Saber Pack has no themes in this build.":"Bundled Saber Pack themes. X installs; no network needed.";
+   a4_log("pack","list built entries=%u",(unsigned)themes.size());
+   first_load_settled=true;
+   return;
+  }
   if(loaded_pages[source]!=pages[source]) {
    catalogs[source]=CatalogCache{};
    uint64_t now=(uint64_t)time(nullptr);
@@ -236,6 +325,7 @@ int main() {
   if(!force && catalogs[source].fresh((uint64_t)time(nullptr))) {
    message="Cached catalog ready. Triangle checks for new themes.";
    a4_log("cache","source=%d hit entries=%u network_requests=0",source,(unsigned)themes.size());
+   first_load_settled=true;
    return;
   }
   job=new Job;job->source=source;job->page=pages[source];job->enter_last=enter_last;
@@ -249,6 +339,12 @@ int main() {
   thread=SDL_CreateThread(worker,"network",job);
   if(!thread){delete job;job=nullptr;message="Could not create network worker.";}
  };
+ auto start_update_check=[&](bool manual) {
+  job=new Job;job->source=source;job->update_check=true;job->update_manual=manual;
+  if(manual)message="Checking for updates...";
+  thread=SDL_CreateThread(worker,"update",job);
+  if(!thread){delete job;job=nullptr;if(manual)message="Could not create network worker.";}
+ };
  auto request_load=[&](bool force,bool enter_last) {
   // A catalog job in flight is cancelled and the load runs when the worker
   // is joined; a download in flight is left alone and the load queues behind it.
@@ -258,6 +354,8 @@ int main() {
   pending_load=true;pending_force=force;pending_enter_last=enter_last;pending_download=false;
   if(!was_download)message="Loading catalog...";
  };
+ std::string bgm_path=std::string(data_dir)+"bgm_startup.wav";
+ a4_bgm_start(bgm_path.c_str());
  load_source(false);a4_log("boot","catalog started; entering menu loop");
  while(!quitting || job) {
   a4_watchdog_tick();a4_watchdog_phase(A4_PHASE_SYSUTIL);
@@ -268,8 +366,8 @@ int main() {
   uint32_t pressed=pad.buttons&~held;held=pad.buttons;
   if(job && __atomic_load_n(&job->done,__ATOMIC_ACQUIRE)) {
    SDL_WaitThread(thread,nullptr);
-   int jsrc=job->source;unsigned jpage=job->page;bool jdl=job->download;bool jenter=job->enter_last;
-   if(!jdl && !job->results.empty()) {
+   int jsrc=job->source;unsigned jpage=job->page;bool jdl=job->download;bool jenter=job->enter_last;bool jupd=job->update_check;
+   if(!jdl && !jupd && !job->results.empty()) {
     catalogs[jsrc].entries=job->results;catalogs[jsrc].more=job->more;
     catalogs[jsrc].fetched=(uint64_t)time(nullptr);
     if(!write_catalog_cache(cache_path(jsrc,jpage),jsrc,catalogs[jsrc]))a4_log("cache","source=%d disk save failed; memory cache retained",jsrc);
@@ -277,25 +375,42 @@ int main() {
     // swap the results onto the screen if they are for what is showing.
     if(jsrc==source && jpage==pages[source]){themes=catalogs[jsrc].entries;selected=jenter?(int)themes.size()-1:0;}
    }
-   message=job->message;delete job;job=nullptr;thread=nullptr;dirty=true;
+   if(!jdl && !jupd)first_load_settled=true;
+   // An update job only replaces the message when it has something to
+   // say (a newer version, or the result of a manual check); a silent
+   // automatic check leaves the catalog message untouched.
+   if(!jupd || !job->message.empty())message=job->message;
+   delete job;job=nullptr;thread=nullptr;dirty=true;
    if(!quitting) {
     if(pending_download){pending_download=false;Theme t=pending_theme;pending_theme=Theme{};if(!t.title.empty())start_download(t);}
     else if(pending_load){pending_load=false;bool f=pending_force;bool e=pending_enter_last;pending_force=false;pending_enter_last=false;load_source(f,e);}
-   } else {pending_load=false;pending_download=false;}
+    else if(pending_update){pending_update=false;start_update_check(true);}
+   } else {pending_load=false;pending_download=false;pending_update=false;}
+  }
+  // Once per launch, after the first catalog load has settled and no
+  // other job is running, quietly check for a newer DreamShelf.
+  if(!quitting && !update_checked && first_load_settled && !job && !pressed) {
+   update_checked=true;start_update_check(false);
   }
   if(quitting && job)__atomic_store_n(&job->cancel,1,__ATOMIC_RELAXED);
   if(!quitting && pressed) {
    if(pressed&A4B_BIT(A4B_CIRCLE)){
-    if(job){__atomic_store_n(&job->cancel,1,__ATOMIC_RELAXED);pending_load=false;pending_download=false;message="Cancelling...";}
+    if(job && job->update_check && !job->update_manual){__atomic_store_n(&job->cancel,1,__ATOMIC_RELAXED);pending_load=false;pending_download=false;pending_update=false;quitting=true;}
+    else if(job){__atomic_store_n(&job->cancel,1,__ATOMIC_RELAXED);pending_load=false;pending_download=false;pending_update=false;message="Cancelling...";}
     else quitting=true;
    }
    // Every other button works whether or not a worker is running: navigation
    // applies to the entries on screen immediately, and loads/downloads
    // requested mid-job are queued behind the running worker.
    bool load=false,force=false,enter_last=false;
-   if(pressed&A4B_BIT(A4B_R1)){source=(source+1)%3;themes.clear();selected=0;load=true;}
-   if(pressed&A4B_BIT(A4B_L1)){source=(source+2)%3;themes.clear();selected=0;load=true;}
+   if(pressed&A4B_BIT(A4B_R1)){source=(source+1)%4;themes.clear();selected=0;load=true;}
+   if(pressed&A4B_BIT(A4B_L1)){source=(source+3)%4;themes.clear();selected=0;load=true;}
    if(pressed&A4B_BIT(A4B_TRIANGLE)){load=true;force=true;}
+   if(pressed&A4B_BIT(A4B_SQUARE)){
+    if(!job)start_update_check(true);
+    else if(!job->update_check)pending_update=true;
+    else if(job->update_check)message="Checking for updates...";
+   }
    if(!load && !themes.empty()) {
     bool next=(pressed&A4B_BIT(A4B_R2)) || ((pressed&A4B_BIT(A4B_DOWN)) && selected==(int)themes.size()-1) || ((pressed&A4B_BIT(A4B_RIGHT)) && selected==(int)themes.size()-1);
     bool prev=(pressed&A4B_BIT(A4B_L2)) || ((pressed&A4B_BIT(A4B_UP)) && selected==0);
@@ -341,6 +456,6 @@ int main() {
   }
   a4_watchdog_phase(A4_PHASE_DELAY);SDL_Delay(16);
  }
- a4_watchdog_stop();a4_font_destroy(font);SDL_DestroyRenderer(r);SDL_DestroyWindow(w);SDL_Quit();
+ a4_bgm_stop();a4_watchdog_stop();a4_font_destroy(font);SDL_DestroyRenderer(r);SDL_DestroyWindow(w);SDL_Quit();
  curl_easy_cleanup(network_handle);curl_global_cleanup();netDeinitialize();return 0;
 }

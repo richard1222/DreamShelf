@@ -52,10 +52,12 @@ void draw_theme_ui(SDL_Renderer *r,A4Font *f,int source,unsigned page,
  rounded(r,43,155,260,410,14,{217,222,225});rounded(r,40,150,260,410,14,paper);
  rounded(r,327,155,916,410,14,{217,222,225});rounded(r,324,150,916,410,14,paper);
  text(r,f,62,175,"CATALOGS",2,muted);
- for(int i=0;i<3;++i) {
-  int y=218+i*61;bool active=i==source;
-  rounded(r,54,y,232,49,8,active?orange:Color{241,243,244});
-  text(r,f,67,y+12,i==2?"Backup picks":sources[i].name,2,active?paper:ink);
+ for(int i=0;i<4;++i) {
+  // Pitch 48 / height 40 (was 61 / 49 for three rows): the fourth row
+  // now ends at y=402, clear of the VMU LCD panel starting at y=419.
+  int y=218+i*48;bool active=i==source;
+  rounded(r,54,y,232,40,8,active?orange:Color{241,243,244});
+  text(r,f,67,y+8,i==2?"Backup picks":sources[i].name,2,active?paper:ink);
  }
  // A small VMU-inspired LCD shows real transfer state, without idle animation.
  rounded(r,88,419,162,125,12,{217,222,225});rounded(r,92,423,154,117,10,{245,245,243});
@@ -86,6 +88,7 @@ void draw_theme_ui(SDL_Renderer *r,A4Font *f,int source,unsigned page,
   second_line=first_line.substr(cut+(first_line[cut]==' '?1:0));first_line.resize(cut);
  }
  text(r,f,61,591,first_line,2,ink);text(r,f,61,623,clipped(second_line,70),1,muted);
- key(r,f,48,675,"X","Download");key(r,f,246,675,"L1/R1","Site");
- key(r,f,440,675,"L2/R2","Page");key(r,f,635,675,"Triangle","Refresh");key(r,f,920,675,"Circle","Back / Quit");
+ key(r,f,48,675,"X","Download");key(r,f,225,675,"L1/R1","Site");
+ key(r,f,370,675,"L2/R2","Page");key(r,f,515,675,"Triangle","Refresh");
+ key(r,f,730,675,"Square","Updates");key(r,f,930,675,"Circle","Back / Quit");
 }

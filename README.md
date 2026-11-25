@@ -2,10 +2,11 @@
 
 Download PS3 themes directly on your console, with a Dreamcast-inspired interface.
 
-- Browse PS3-Themes, Themezer and a curated backup catalog.
+- Browse PS3-Themes, Themezer and a curated backup catalog, plus the bundled Saber Pack (works offline).
 - Continue through catalog pages with Down or L2/R2.
 - Cache visited pages for 30 minutes for quicker return visits.
 - Download P3T files to the HDD, then choose them in XMB Theme Settings.
+- Check for DreamShelf updates automatically at launch, or any time with Square.
 
 ![DreamShelf interface](docs/ui-preview.png)
 
@@ -13,7 +14,7 @@ Download PS3 themes directly on your console, with a Dreamcast-inspired interfac
 
 ## Install
 
-Download **DreamShelf-v0.1.6.pkg** from [Releases](https://github.com/richard1222/DreamShelf/releases), install it with Package Manager, then open **DreamShelf**. CFW or HEN is required to run the app.
+Download **DreamShelf-v0.1.9.pkg** from [Releases](https://github.com/richard1222/DreamShelf/releases), install it with Package Manager, then open **DreamShelf**. CFW or HEN is required to run the app.
 
 Themes save to `/dev_hdd0/theme/`. Quit the app and select one through **Settings > Theme Settings > Theme**. DreamShelf does not apply themes automatically.
 
@@ -27,6 +28,7 @@ Themes save to `/dev_hdd0/theme/`. Quit the app and select one through **Setting
 | Left / Right | Jump ten rows |
 | X | Download selected theme |
 | Triangle | Refresh current page |
+| Square | Check for updates |
 | Circle | Cancel a transfer, or quit when idle |
 
 ## Catalogs
@@ -34,8 +36,11 @@ Themes save to `/dev_hdd0/theme/`. Quit the app and select one through **Setting
 - [PS3-Themes](http://www.ps3-themes.com/)
 - [Themezer](https://themezer.net/ps3/themes)
 - [WhatWhatBoy curated backup](https://whatwhatboy.com/console/ps3/themes.html)
+- Saber Pack - themes bundled with the app (Saber Royal HD and more), installed locally with no network connection
 
-The curated backup has 28 entries. Larger catalogs load one page at a time. Site availability and ordering can change. Search and picture previews are not included yet. No theme files are bundled; original authors retain their rights.
+The curated backup has 28 entries. Larger catalogs load one page at a time. Site availability and ordering can change. Search and picture previews are not included yet. The Saber Pack bundles only themes created for DreamShelf; downloaded catalog themes remain the property of their original authors.
+
+DreamShelf checks a small version file on its GitHub repo once per launch and shows a message if a newer version exists; Square checks on demand. The check is message-only: DreamShelf never downloads or installs updates itself.
 
 HTTPS downloads verify certificates against the included Mozilla CA list from curl.se. The original PS3-Themes endpoint uses public HTTP. Downloads have size limits and cancellation, and completed files are preserved.
 
@@ -43,7 +48,7 @@ HTTPS downloads verify certificates against the included Mozilla CA list from cu
 
 Use a [PSL1GHT](https://github.com/ps3dev/PSL1GHT) toolchain with SDL2, curl, mbedTLS and zlib [PS3 portlibs](https://github.com/ps3dev/ps3libraries). Set `PS3DEV` and `PSL1GHT` to your SDK prefix and add its `bin`, `ppu/bin` and `spu/bin` directories to PATH. Run `make pkg`.
 
-The installable, finalized output is `build/DreamShelf-v0.1.6.pkg`. The `.debug.pkg` file is an intermediate. Application ID `THMS00001` preserves the existing ThemeShelf installation identity.
+The installable, finalized output is `build/DreamShelf-v0.1.9.pkg`. The `.debug.pkg` file is an intermediate. Application ID `THMS00001` preserves the existing ThemeShelf installation identity.
 
 Host tests are in `tests/`. The catalog test accepts saved HTML fixtures as command-line arguments; those third-party pages are not bundled. Cache tests and the UI raster preview can run with a C++17 host compiler. Network timing and startup logs are written to `/dev_hdd0/tmp/themeshelf.log`; caches use `/dev_hdd0/tmp/themeshelf/`.
 
